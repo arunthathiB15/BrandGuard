@@ -52,6 +52,26 @@ def init_db():
    c.execute('insert into audit(review_id,actor,action,details,created_at) values(?,?,?,?,?)',(rid,'System','Demo seed','Sample review created for the demo.',datetime.now().isoformat(timespec='seconds')))
  c.commit(); c.close()
 
+def claim_expiry_state(claim, today=None):
+ """Return whether a registered claim is active, expired, or has an invalid expiry date.
+
+ The stored status is not sufficient by itself: an accidentally stale `active` status
+ must not make out-of-date evidence look valid.
+ """
+ status = (claim.get('status') or '').strip().lower()
+ if status == 'expired':
+  return 'expired'
+ try:
+  expiry = date.fromisoformat(str(claim.get('expires', '')).strip())
+ except (TypeError, ValueError):
+  return 'invalid'
+ today = today or date.today()
+ return 'expired' if expiry < today else 'active'
+
+def normalise_claim_text(value):
+ """Normalise punctuation/spacing so a registered claim can be matched consistently."""
+ return re.sub(r'[^a-z0-9]+', ' ', (value or '').lower()).strip()
+
 def review_content(content, c=None):
  own=False
  if c is None: c=conn(); own=True
@@ -76,6 +96,19 @@ def review_content(content, c=None):
    excerpt=claim['claim']
    if excerpt.lower() in low or any(n in low for n in re.findall(r'\d[\d,]*%?',excerpt)):
     add('claims','high',excerpt,'This claim appears in the draft but its approved evidence has expired. Verify or remove it before publication.',claim['id'],'Remove the claim or replace it with a current, approved fact.',.98)
+ # Flag a registered claim if its exact wording appears and its evidence is expired
+ # or has an invalid expiry date. Date comparison is authoritative even when the
+ # stored status was mistakenly left as "active".
+ normalised_content = normalise_claim_text(content)
+ for claim in claims:
+  normalised_claim = normalise_claim_text(claim.get('claim', ''))
+  if not normalised_claim or normalised_claim not in normalised_content:
+   continue
+  expiry_state = claim_expiry_state(claim)
+  if expiry_state == 'expired':
+   add('claims','high',claim['claim'],'This registered claim appears in the draft, but its approved evidence has expired. Verify or remove it before publication.',claim['id'],'Remove the claim or replace it with a current, approved fact.',.98)
+  elif expiry_state == 'invalid':
+   add('claims','high',claim['claim'],'The registered claim has an invalid or missing expiry date, so its evidence validity cannot be confirmed. Ask the claim owner to verify it before publication.',claim['id'],'Confirm the evidence source and enter a valid expiry date before using this claim.',.65)
  # detect numerical/absolute/ranking claims that aren't grounded by an active approved claim
  for m in re.finditer(r'(?i)(?:\b\d{1,3}(?:,\d{3})*(?:\.\d+)?\s*%|\b(?:#1|number one|no\. 1|guaranteed|best-in-class|world-leading)\b)',content):
   excerpt=m.group(0)

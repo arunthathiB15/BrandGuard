@@ -63,3 +63,15 @@ The application uses a local SQLite database at `data/brandguard.db`, created an
 5. Open Claim ledger and Brand guidelines; add a test claim/rule.
 6. Open Governance insights and Visual & accessibility; upload a sample image with and without alt text.
 7. Export the review JSON and show the audit trail.
+
+## Claim expiry regression tests
+
+The Claim Ledger review check compares a claim's expiry date with the current date, even if its stored status was accidentally left as `active`. A malformed or missing expiry date is flagged for human verification when the registered claim wording appears in a draft.
+
+Run the built-in regression tests from the repository root:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The tests cover stale evidence with an `active` status, a future-dated active claim, an explicitly expired claim, and an invalid expiry date.
