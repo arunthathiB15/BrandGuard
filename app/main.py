@@ -72,6 +72,50 @@ def normalise_claim_text(value):
  """Normalise punctuation/spacing so a registered claim can be matched consistently."""
  return re.sub(r'[^a-z0-9]+', ' ', (value or '').lower()).strip()
 
+def _content_words(text):
+ """Lower-case words of 3+ letters, ignoring numbers, for simple topic matching."""
+ return {w for w in re.findall(r'[a-z]+',(text or '').lower()) if len(w)>=3}
+
+def is_supported_by_active_claim(content, pos, excerpt, claims):
+ """True when the sentence around `excerpt` talks about the same thing as an active,
+ in-date ledger claim that contains the same figure/wording (at least two shared words)."""
+ start=max(content.rfind('.',0,pos),content.rfind('!',0,pos),content.rfind('?',0,pos),content.rfind('\n',0,pos))+1
+ ends=[i for i in (content.find(ch,pos) for ch in '.!?\n') if i!=-1]
+ sentence=content[start:min(ends) if ends else len(content)]
+ words=_content_words(sentence)
+ for cl in claims:
+  if claim_expiry_state(cl)!='active': continue
+  if excerpt.lower() not in (cl.get('claim') or '').lower(): continue
+  if len(words & _content_words(cl.get('claim'))) >= 2: return True
+ return False
+
+SLANG={'guys':'everyone','awesome':'excellent','gonna':'going to','wanna':'want to','gotta':'need to','lol':'','kinda':'somewhat'}
+EMOJI_RE=re.compile('[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B50]')
+CAPS_ALLOWED={'HTTP','HTTPS','HTML','FAQS','INDIA','CSS','JSON'}
+
+def tone_and_access_findings(content, rules):
+ """Tone / accessibility checks. A check only runs if the approved rule that backs it
+ exists in the rule library, so no finding can be raised without a citable source."""
+ ids={r['id'] for r in rules}
+ out=[]  # (category, severity, excerpt, reason, source, fix, confidence)
+ if 'VOICE-01' in ids:
+  bangs=[m for m in re.finditer(r'!+',content)]
+  if sum(len(m.group(0)) for m in bangs)>1:
+   target=bangs[1] if len(bangs)>1 else bangs[0]
+   out.append(('tone','medium',target.group(0),'More than one exclamation mark reads as shouting and weakens a confident, human tone.','VOICE-01','Use at most one exclamation mark; show enthusiasm with specific words.',.85))
+  for w in sorted({m.group(0) for m in re.finditer(r'\b[A-Z]{4,}\b',content)}-CAPS_ALLOWED):
+   out.append(('tone','low',w,'Words in all capitals read as shouting. Use sentence case.','VOICE-01',w.capitalize(),.85))
+  for word,repl in SLANG.items():
+   m=re.search(r'\b'+re.escape(word)+r'\b',content,re.I)
+   if m: out.append(('tone','medium',m.group(0),'Casual slang is outside the helpful, confident, professional tone in the voice guide.','VOICE-01',repl or 'remove this word',.85))
+  emojis=EMOJI_RE.findall(content)
+  if len(emojis)>2:
+   out.append(('tone','low',''.join(emojis[2:]),'More than two emojis in one piece of content; the voice guide asks for restraint.','VOICE-01','Keep at most two emojis.',.8))
+ if 'ACCESS-01' in ids:
+  m=re.search(r'\bclick here\b',content,re.I)
+  if m: out.append(('accessibility','medium',m.group(0),'Link text such as “click here” does not tell screen-reader users where the link goes.','ACCESS-01','Use descriptive link text, e.g. “read the care guide”.',.9))
+ return out
+
 def review_content(content, c=None):
  own=False
  if c is None: c=conn(); own=True
@@ -79,6 +123,7 @@ def review_content(content, c=None):
  claims=[dict(x) for x in c.execute('select * from claims').fetchall()]
  findings=[]
  def add(category,severity,excerpt,reason,source,fix,confidence=0.92):
+  if any(x['source_id']==source and x['excerpt'].lower()==excerpt.lower() for x in findings): return
   findings.append({'id':'F-'+uuid.uuid4().hex[:6].upper(),'category':category,'severity':severity,'excerpt':excerpt,'reason':reason,'source_id':source,'source':next((r['title']+': '+r['body'] for r in rules if r['id']==source),next((x['claim']+' — '+x['source'] for x in claims if x['id']==source),'No approved source available')),'fix':fix,'minimal_fix':fix,'tone_rewrite':fix,'clarify':'Ask the content owner to provide approved evidence or clarify the intended wording.','confidence':confidence,'decision':'open'})
  low=content.lower()
  for phrase,src,fix,reason in [
@@ -113,8 +158,9 @@ def review_content(content, c=None):
  for m in re.finditer(r'(?i)(?:\b\d{1,3}(?:,\d{3})*(?:\.\d+)?\s*%|\b(?:#1|number one|no\. 1|guaranteed|best-in-class|world-leading)\b)',content):
   excerpt=m.group(0)
   if not any(f['excerpt'].lower()==excerpt.lower() or excerpt.lower() in f['excerpt'].lower() for f in findings):
-   active_supported=any(cl['status']=='active' and any(tok in low for tok in re.findall(r'[a-z0-9]+',cl['claim'].lower()) if len(tok)>4) for cl in claims)
+   if is_supported_by_active_claim(content,m.start(),excerpt,claims): continue
    add('claims','high' if '%' in excerpt or '#' in excerpt else 'medium',excerpt,'Promotional or quantitative claim detected. The current approved register does not clearly establish evidence for this exact wording; human verification is required.','CLAIM-01','Attach an approved source, or rewrite the statement as a non-quantified benefit.',.72)
+ for t in tone_and_access_findings(content,rules): add(*t)
  # generic readability/tone
  if len(content.split())>80:
   add('accessibility','low','Long-form draft','This draft is relatively long for a quick promotional message. Consider shorter sentences and plain language.','ACCESS-01','Break long sentences into shorter, direct statements.',.75)
